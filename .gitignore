@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.log
+faiss_index/
+.pytest_cache/
+
+# Node dependencies
+node_modules/
+dashboard/node_modules/
+
+# Node dependencies
+node_modules/
+dashboard/node_modules/
+
+# Node dependencies
+node_modules/
+dashboard/node_modules/
