@@ -1297,3 +1297,24 @@ footer span {
     height: 135px;
   }
 }
+
+.recovery-assign-button {
+  border: 1px solid #d7dce3;
+  background: #ffffff;
+  color: #1f2937;
+  border-radius: 8px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.recovery-assign-button:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+}
+
+.recovery-assign-button:active {
+  transform: translateY(1px);
+}

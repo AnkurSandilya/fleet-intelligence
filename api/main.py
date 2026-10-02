@@ -761,6 +761,316 @@ def top_problematic_vehicles(
     }
 
 
+
+
+def calculate_recovery_risk():
+    """
+    Calculate recovery risk score for every vehicle.
+
+    Severity weights:
+    CRITICAL = 30
+    HIGH     = 20
+    MEDIUM   = 10
+    LOW      = 5
+    """
+
+    conn = get_db()
+
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+
+            cur.execute("""
+                SELECT
+                    v.vehicle_id,
+                    v.vin,
+                    COUNT(i.incident_id) AS incident_count,
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN i.severity = 'CRITICAL' THEN 30
+                                WHEN i.severity = 'HIGH' THEN 20
+                                WHEN i.severity = 'MEDIUM' THEN 10
+                                WHEN i.severity = 'LOW' THEN 5
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS risk_score
+                FROM vehicle v
+                LEFT JOIN incident i
+                    ON v.vehicle_id = i.vehicle_id
+                GROUP BY v.vehicle_id, v.vin
+                ORDER BY risk_score DESC
+            """)
+
+            vehicles = cur.fetchall()
+
+        results = []
+
+        for vehicle in vehicles:
+
+            score = min(int(vehicle["risk_score"]), 100)
+
+            if score >= 81:
+                level = "CRITICAL"
+                priority = "IMMEDIATE"
+            elif score >= 61:
+                level = "HIGH"
+                priority = "URGENT"
+            elif score >= 31:
+                level = "MEDIUM"
+                priority = "NORMAL"
+            else:
+                level = "LOW"
+                priority = "LOW"
+
+            results.append({
+                "vehicle_id": vehicle["vehicle_id"],
+                "vehicle_code": vehicle["vin"],
+                "risk_score": score,
+                "risk_level": level,
+                "priority": priority,
+                "incident_count": vehicle["incident_count"]
+            })
+
+        return results
+
+    finally:
+        conn.close()
+
+
+
+@app.get("/api/recovery/risk")
+def recovery_risk(
+    limit: int = 20,
+    user=Depends(require_auth),
+):
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100"
+        )
+
+    vehicles = calculate_recovery_risk()
+
+    return {
+        "count": min(limit, len(vehicles)),
+        "vehicles": vehicles[:limit]
+    }
+
+
+
+@app.post("/api/recovery/cases/create")
+def create_recovery_cases(user=Depends(require_auth)):
+    vehicles = calculate_recovery_risk()
+    conn = get_db()
+
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            created = []
+
+            for vehicle in vehicles:
+                if vehicle["risk_level"] != "CRITICAL":
+                    continue
+
+                cur.execute("""
+                    SELECT case_id
+                    FROM recovery_case
+                    WHERE vehicle_id = %s
+                      AND status IN ('OPEN', 'ASSIGNED')
+                    LIMIT 1
+                """, (vehicle["vehicle_id"],))
+
+                existing = cur.fetchone()
+
+                if existing:
+                    continue
+
+                cur.execute("""
+                    INSERT INTO recovery_case
+                    (
+                        vehicle_id,
+                        risk_score,
+                        risk_level,
+                        priority,
+                        status
+                    )
+                    VALUES (%s, %s, %s, %s, 'OPEN')
+                    RETURNING case_id
+                """, (
+                    vehicle["vehicle_id"],
+                    vehicle["risk_score"],
+                    vehicle["risk_level"],
+                    vehicle["priority"]
+                ))
+
+                row = cur.fetchone()
+
+                created.append({
+                    "case_id": row["case_id"],
+                    "vehicle_id": vehicle["vehicle_id"],
+                    "vehicle_code": vehicle["vehicle_code"],
+                    "risk_score": vehicle["risk_score"],
+                    "risk_level": vehicle["risk_level"],
+                    "priority": vehicle["priority"],
+                    "status": "OPEN"
+                })
+
+            conn.commit()
+
+            return {
+                "created_count": len(created),
+                "cases": created
+            }
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+
+
+@app.patch("/api/recovery/cases/{case_id}/assign")
+def assign_recovery_agent(
+    case_id: int,
+    assigned_agent: str,
+    user=Depends(require_auth)
+):
+    if not assigned_agent.strip():
+        raise HTTPException(status_code=400, detail="Agent name is required")
+
+    conn = get_db()
+
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                UPDATE recovery_case
+                SET assigned_agent = %s,
+                    status = 'ASSIGNED'
+                WHERE case_id = %s
+                  AND status = 'OPEN'
+                RETURNING
+                    case_id,
+                    vehicle_id,
+                    risk_score,
+                    risk_level,
+                    priority,
+                    status,
+                    assigned_agent
+            """, (assigned_agent.strip(), case_id))
+
+            case = cur.fetchone()
+
+            if not case:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Open recovery case not found"
+                )
+
+            conn.commit()
+
+            return dict(case)
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+
+@app.patch("/api/recovery/cases/{case_id}/resolve")
+def resolve_recovery_case(
+    case_id: int,
+    user=Depends(require_auth)
+):
+    conn = get_db()
+
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                UPDATE recovery_case
+                SET status = 'RESOLVED',
+                    resolved_at = CURRENT_TIMESTAMP
+                WHERE case_id = %s
+                  AND status = 'ASSIGNED'
+                RETURNING
+                    case_id,
+                    vehicle_id,
+                    risk_score,
+                    risk_level,
+                    priority,
+                    status,
+                    assigned_agent,
+                    resolved_at
+            """, (case_id,))
+
+            case = cur.fetchone()
+
+            if not case:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Assigned recovery case not found"
+                )
+
+            conn.commit()
+
+            return dict(case)
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+@app.get("/api/recovery/cases")
+def get_recovery_cases(user=Depends(require_auth)):
+    conn = get_db()
+
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    rc.case_id,
+                    rc.vehicle_id,
+                    v.vin AS vehicle_code,
+                    rc.risk_score,
+                    rc.risk_level,
+                    rc.priority,
+                    rc.status,
+                    rc.assigned_agent,
+                    rc.created_at
+                FROM recovery_case rc
+                JOIN vehicle v
+                    ON v.vehicle_id = rc.vehicle_id
+                ORDER BY
+                    rc.risk_score DESC,
+                    rc.created_at DESC
+            """)
+
+            cases = cur.fetchall()
+
+            return {
+                "count": len(cases),
+                "cases": [dict(case) for case in cases]
+            }
+
+    finally:
+        conn.close()
+
 @app.get("/api/analytics/batch")
 def batch_analytics(user=Depends(require_auth)):
     analytics = calculate_incident_batch_analytics()

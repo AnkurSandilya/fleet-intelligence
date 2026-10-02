@@ -71,6 +71,7 @@ function App() {
   const [dashboard, setDashboard] = useState(null);
   const [critical, setCritical] = useState([]);
   const [analytics, setAnalytics] = useState([]);
+  const [recoveryCases, setRecoveryCases] = useState([]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
@@ -93,7 +94,7 @@ function App() {
 
       const token = await getAuthToken();
 
-      const [dashboardRes, criticalRes, analyticsRes] =
+      const [dashboardRes, criticalRes, analyticsRes, recoveryCasesRes] =
         await Promise.all([
           fetch(`${API}/api/dashboard`),
           fetch(`${API}/api/vehicles/critical`, {
@@ -106,19 +107,31 @@ function App() {
               Authorization: `Bearer ${token}`,
             },
           }),
+          fetch(`${API}/api/recovery/cases`, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }),
         ]);
 
-      if (!dashboardRes.ok || !criticalRes.ok || !analyticsRes.ok) {
+      if (
+        !dashboardRes.ok ||
+        !criticalRes.ok ||
+        !analyticsRes.ok ||
+        !recoveryCasesRes.ok
+      ) {
         throw new Error("Unable to load fleet data");
       }
 
       const dashboardData = await dashboardRes.json();
       const criticalData = await criticalRes.json();
       const analyticsData = await analyticsRes.json();
+      const recoveryCasesData = await recoveryCasesRes.json();
 
       setDashboard(dashboardData);
       setCritical(criticalData.vehicles || []);
       setAnalytics(analyticsData.by_type || []);
+      setRecoveryCases(recoveryCasesData.cases || []);
       setLastUpdated(new Date());
     } catch (err) {
       console.error(err);
@@ -126,6 +139,31 @@ function App() {
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  };
+
+  const assignRecoveryAgent = async (caseId) => {
+    try {
+      const token = await getAuthToken();
+
+      const response = await fetch(
+        `${API}/api/recovery/cases/${caseId}/assign?assigned_agent=Recovery%20Agent%2001`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Unable to assign recovery agent");
+      }
+
+      await fetchData(true);
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "Unable to assign recovery agent.");
     }
   };
 
@@ -657,6 +695,85 @@ function App() {
                 </button>
               );
             })}
+          </div>
+        </section>
+
+        <section className="panel recovery-panel">
+          <div className="panel-heading">
+            <div>
+              <span className="section-label">RECOVERY OPERATIONS</span>
+              <h2>Recovery cases</h2>
+            </div>
+
+            <div className="critical-summary">
+              <ShieldAlert size={14} />
+              {recoveryCases.filter((item) => item.status !== "RESOLVED").length} active cases
+            </div>
+          </div>
+
+          <div className="vehicle-table recovery-table">
+            <div className="table-head">
+              <span>Vehicle</span>
+              <span>Risk</span>
+              <span>Priority</span>
+              <span>Status</span>
+              <span>Agent</span>
+              <span />
+            </div>
+
+            {recoveryCases.slice(0, 10).map((recoveryCase) => (
+              <div className="vehicle-row recovery-row" key={recoveryCase.case_id}>
+                <div className="vehicle-main">
+                  <div className="vehicle-avatar">
+                    <Car size={14} />
+                  </div>
+
+                  <div>
+                    <strong>{recoveryCase.vehicle_code}</strong>
+                    <span>Case #{recoveryCase.case_id}</span>
+                  </div>
+                </div>
+
+                <div className="health-cell">
+                  <strong>{recoveryCase.risk_score}</strong>
+                  <div className="mini-progress">
+                    <span
+                      style={{
+                        width: `${Math.min(
+                          Number(recoveryCase.risk_score || 0),
+                          100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <span className="critical-status">
+                  <span />
+                  {recoveryCase.priority}
+                </span>
+
+                <span className="critical-status">
+                  <span />
+                  {recoveryCase.status}
+                </span>
+
+                <span className="oem">
+                  {recoveryCase.assigned_agent || "Unassigned"}
+                </span>
+
+                {recoveryCase.status === "OPEN" ? (
+                  <button
+                    className="recovery-assign-button"
+                    onClick={() => assignRecoveryAgent(recoveryCase.case_id)}
+                  >
+                    Assign
+                  </button>
+                ) : (
+                  <ChevronRight size={16} />
+                )}
+              </div>
+            ))}
           </div>
         </section>
       </main>
